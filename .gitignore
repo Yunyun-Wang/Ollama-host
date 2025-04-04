@@ -43,3 +43,4 @@ env/
 .vscode/
 *.swp
 *.swo 
+users.db
