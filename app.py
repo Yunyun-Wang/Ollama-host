@@ -7,6 +7,10 @@ import uuid
 import hashlib
 import sqlite3
 from functools import wraps
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import base64
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # For session management
@@ -148,14 +152,38 @@ def get_models():
 @login_required
 def get_conversations():
     try:
+        user_id = session.get('user_id')
         user_dir = get_user_conversations_dir()
+        
+        # Get the user's password hash for decryption
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT password FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        password_hash = user[0]
+        
         conversations = []
         
         for filename in os.listdir(user_dir):
-            if filename.endswith('.json'):
-                with open(os.path.join(user_dir, filename), 'r') as f:
-                    conversation = json.load(f)
-                    conversations.append(conversation)
+            if filename.endswith('.enc'):
+                try:
+                    with open(os.path.join(user_dir, filename), 'r') as f:
+                        encrypted_data = f.read()
+                        conversation = decrypt_data(encrypted_data, password_hash)
+                        # Only include necessary metadata for the list view
+                        conversations.append({
+                            "id": conversation["id"],
+                            "title": conversation["title"],
+                            "model": conversation["model"],
+                            "updated_at": conversation["updated_at"]
+                        })
+                except Exception as e:
+                    print(f"Error decrypting conversation {filename}: {e}")
         
         # Sort by last modified time (newest first)
         conversations.sort(key=lambda x: x.get('updated_at', 0), reverse=True)
@@ -167,14 +195,26 @@ def get_conversations():
 @login_required
 def get_conversation(conversation_id):
     try:
+        user_id = session.get('user_id')
         user_dir = get_user_conversations_dir()
-        if not user_dir:
-            return jsonify({"error": "User not logged in"}), 401
-            
-        file_path = os.path.join(user_dir, f"{conversation_id}.json")
+        
+        # Get the user's password hash for decryption
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT password FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        password_hash = user[0]
+        
+        file_path = os.path.join(user_dir, f"{conversation_id}.enc")
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
-                conversation = json.load(f)
+                encrypted_data = f.read()
+                conversation = decrypt_data(encrypted_data, password_hash)
             return jsonify(conversation)
         else:
             return jsonify({"error": "Conversation not found"}), 404
@@ -215,7 +255,7 @@ def delete_conversation(conversation_id):
         if not user_dir:
             return jsonify({"error": "User not logged in"}), 401
             
-        file_path = os.path.join(user_dir, f"{conversation_id}.json")
+        file_path = os.path.join(user_dir, f"{conversation_id}.enc")
         if os.path.exists(file_path):
             os.remove(file_path)
             return jsonify({"success": True})
@@ -233,37 +273,82 @@ def clear_conversations():
             return jsonify({"error": "User not logged in"}), 401
             
         for filename in os.listdir(user_dir):
-            if filename.endswith('.json'):
+            if filename.endswith('.enc'):
                 os.remove(os.path.join(user_dir, filename))
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def get_encryption_key(password_hash):
+    # Use the first 32 bytes of the password hash as a salt
+    salt = password_hash[:32].encode()
+    
+    # Use PBKDF2 to derive a key from the password hash
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    
+    # Use the rest of the password hash as the key material
+    key = base64.urlsafe_b64encode(kdf.derive(password_hash[32:].encode()))
+    return key
+
+def encrypt_data(data, password_hash):
+    key = get_encryption_key(password_hash)
+    f = Fernet(key)
+    return f.encrypt(json.dumps(data).encode()).decode()
+
+def decrypt_data(encrypted_data, password_hash):
+    key = get_encryption_key(password_hash)
+    f = Fernet(key)
+    return json.loads(f.decrypt(encrypted_data.encode()).decode())
+
 def save_conversation(conversation_id, messages, model, title=None):
-    """Save a conversation to disk"""
+    """Save an encrypted conversation to disk"""
     print("\n=== SAVE CONVERSATION DEBUG ===")
     print(f"Saving conversation: {conversation_id}")
     print(f"Title provided: {title}")
     
-    user_dir = get_user_conversations_dir()
-    if not user_dir:
-        print("No user directory available, user not logged in")
+    user_id = session.get('user_id')
+    if not user_id:
+        print("No user logged in")
         return None
     
-    file_path = os.path.join(user_dir, f"{conversation_id}.json")
+    # Get the user's password hash for encryption
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT password FROM users WHERE id = ?', (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        print("User not found in database")
+        return None
+    
+    password_hash = user[0]
+    
+    user_dir = get_user_conversations_dir()
+    if not user_dir:
+        print("No user directory available")
+        return None
+    
+    file_path = os.path.join(user_dir, f"{conversation_id}.enc")
     print(f"File path: {file_path}")
     
-    # If the file exists, read the existing title
+    # If the file exists, read and decrypt the existing data
     existing_title = None
     existing_data = None
     if os.path.exists(file_path):
         try:
             with open(file_path, 'r') as f:
-                existing_data = json.load(f)
+                encrypted_data = f.read()
+                existing_data = decrypt_data(encrypted_data, password_hash)
                 existing_title = existing_data.get('title')
                 print(f"Existing title found: {existing_title}")
         except Exception as e:
-            print(f"Error reading existing file: {e}")
+            print(f"Error reading/decrypting existing file: {e}")
     else:
         print("No existing file found")
     
@@ -287,7 +372,7 @@ def save_conversation(conversation_id, messages, model, title=None):
             title = first_message['content'][:30] + ('...' if len(first_message['content']) > 30 else '')
             print(f"Generated fallback title from message: {old_title} -> {title}")
     
-    # Preserve other existing data if available
+    # Prepare the conversation data
     conversation_data = {
         "id": conversation_id,
         "title": title,
@@ -296,13 +381,14 @@ def save_conversation(conversation_id, messages, model, title=None):
         "updated_at": int(time.time())
     }
     
-    # Log what's happening
-    print(f"Final title being saved: {title}")
+    # Encrypt the conversation data
+    encrypted_data = encrypt_data(conversation_data, password_hash)
     
+    # Save the encrypted data
     with open(file_path, 'w') as f:
-        json.dump(conversation_data, f, indent=2)
+        f.write(encrypted_data)
     
-    print("Conversation saved successfully")
+    print("Conversation saved and encrypted successfully")
     print("=== END SAVE CONVERSATION DEBUG ===\n")
     
     return title
