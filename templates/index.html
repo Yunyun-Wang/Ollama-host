@@ -593,6 +593,65 @@
                 display: flex; /* Show when toggled */
             }
         }
+
+        .user-info {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .logout-btn {
+            padding: 6px 12px;
+            background-color: #f1f5f9;
+            color: #64748b;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 14px;
+            transition: background-color 0.2s;
+        }
+        
+        .logout-btn:hover {
+            background-color: #e2e8f0;
+        }
+        
+        @media (max-width: 768px) {
+            .user-info {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                flex-direction: row;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 0;
+                background-color: rgba(255, 255, 255, 0.9);
+                padding: 6px 10px;
+                border-radius: 20px;
+                font-size: 12px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                z-index: 100;
+            }
+            
+            .user-info span {
+                font-size: 12px;
+            }
+            
+            .logout-btn {
+                padding: 4px 8px;
+                font-size: 12px;
+                margin: 0;
+            }
+            
+            .controls {
+                padding-top: 40px;
+                position: relative;
+            }
+            
+            #model-selector {
+                width: 100%;
+                margin-top: 10px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -600,6 +659,10 @@
         <div class="controls">
             <label for="model-selector">Model:</label>
             <select id="model-selector"></select>
+            <div class="user-info">
+                <span>Logged in as: {{ username }}</span>
+                <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+            </div>
         </div>
         
         <button class="sidebar-toggle" id="sidebar-toggle">Show Conversations</button>

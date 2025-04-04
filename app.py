@@ -1,11 +1,15 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session, flash
 import requests
 import json
 import time
 import os
 import uuid
+import hashlib
+import sqlite3
+from functools import wraps
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # For session management
 
 OLLAMA_ENDPOINT = "http://localhost:11434/api/chat"
 OLLAMA_LIST_MODELS = "http://localhost:11434/api/tags"
@@ -15,10 +19,53 @@ CONVERSATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "co
 if not os.path.exists(CONVERSATIONS_DIR):
     os.makedirs(CONVERSATIONS_DIR)
 
+# Database setup
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Initialize database on startup
+init_db()
+
+# Login required decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Update conversations directory to be user-specific
+def get_user_conversations_dir():
+    user_id = session.get('user_id')
+    if not user_id:
+        return None
+    
+    user_dir = os.path.join(CONVERSATIONS_DIR, str(user_id))
+    if not os.path.exists(user_dir):
+        os.makedirs(user_dir)
+    return user_dir
+
 @app.route('/')
+@login_required
 def home():
     # Add a cache-busting parameter to prevent partial refreshes
-    return render_template('index.html', cache_bust=str(time.time()))
+    return render_template('index.html', 
+                          cache_bust=str(time.time()), 
+                          username=session.get('username'))
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -98,12 +145,15 @@ def get_models():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/conversations', methods=['GET'])
+@login_required
 def get_conversations():
     try:
+        user_dir = get_user_conversations_dir()
         conversations = []
-        for filename in os.listdir(CONVERSATIONS_DIR):
+        
+        for filename in os.listdir(user_dir):
             if filename.endswith('.json'):
-                with open(os.path.join(CONVERSATIONS_DIR, filename), 'r') as f:
+                with open(os.path.join(user_dir, filename), 'r') as f:
                     conversation = json.load(f)
                     conversations.append(conversation)
         
@@ -114,9 +164,14 @@ def get_conversations():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/conversations/<conversation_id>', methods=['GET'])
+@login_required
 def get_conversation(conversation_id):
     try:
-        file_path = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
+        user_dir = get_user_conversations_dir()
+        if not user_dir:
+            return jsonify({"error": "User not logged in"}), 401
+            
+        file_path = os.path.join(user_dir, f"{conversation_id}.json")
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
                 conversation = json.load(f)
@@ -153,9 +208,14 @@ def create_conversation():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/conversations/<conversation_id>', methods=['DELETE'])
+@login_required
 def delete_conversation(conversation_id):
     try:
-        file_path = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
+        user_dir = get_user_conversations_dir()
+        if not user_dir:
+            return jsonify({"error": "User not logged in"}), 401
+            
+        file_path = os.path.join(user_dir, f"{conversation_id}.json")
         if os.path.exists(file_path):
             os.remove(file_path)
             return jsonify({"success": True})
@@ -165,11 +225,16 @@ def delete_conversation(conversation_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/conversations/clear', methods=['POST'])
+@login_required
 def clear_conversations():
     try:
-        for filename in os.listdir(CONVERSATIONS_DIR):
+        user_dir = get_user_conversations_dir()
+        if not user_dir:
+            return jsonify({"error": "User not logged in"}), 401
+            
+        for filename in os.listdir(user_dir):
             if filename.endswith('.json'):
-                os.remove(os.path.join(CONVERSATIONS_DIR, filename))
+                os.remove(os.path.join(user_dir, filename))
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -180,7 +245,12 @@ def save_conversation(conversation_id, messages, model, title=None):
     print(f"Saving conversation: {conversation_id}")
     print(f"Title provided: {title}")
     
-    file_path = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
+    user_dir = get_user_conversations_dir()
+    if not user_dir:
+        print("No user directory available, user not logged in")
+        return None
+    
+    file_path = os.path.join(user_dir, f"{conversation_id}.json")
     print(f"File path: {file_path}")
     
     # If the file exists, read the existing title
@@ -236,6 +306,69 @@ def save_conversation(conversation_id, messages, model, title=None):
     print("=== END SAVE CONVERSATION DEBUG ===\n")
     
     return title
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            flash('Username and password are required')
+            return render_template('register.html')
+        
+        # Hash the password
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', 
+                          (username, hashed_password))
+            conn.commit()
+            conn.close()
+            
+            flash('Registration successful! Please log in.')
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash('Username already exists')
+            return render_template('register.html')
+    
+    return render_template('register.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            flash('Username and password are required')
+            return render_template('login.html')
+        
+        # Hash the password
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM users WHERE username = ? AND password = ?', 
+                      (username, hashed_password))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if user:
+            session['user_id'] = user[0]
+            session['username'] = username
+            return redirect(url_for('home'))
+        else:
+            flash('Invalid username or password')
+    
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001) 
