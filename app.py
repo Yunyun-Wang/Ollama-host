@@ -103,49 +103,64 @@ def chat():
             print(f"Non-streaming error: {str(e)}")
             return jsonify({"error": str(e)}), 500
     
-    # For streaming requests, use a more robust approach
+    # For streaming requests, go back to streaming but with better error handling
     def generate():
         try:
             # Use a session for better connection handling
             with requests.Session() as session:
-                # Add timeout and increase buffer size
-                response = session.post(OLLAMA_ENDPOINT, json=ollama_request, stream=True, timeout=120)
+                # Stream the response but with a smaller chunk size
+                response = session.post(
+                    OLLAMA_ENDPOINT, 
+                    json=ollama_request, 
+                    stream=True, 
+                    timeout=120
+                )
                 
                 # Initialize an empty response
                 full_response = ""
                 
-                # Stream the response with better error handling
-                try:
-                    for line in response.iter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line.decode('utf-8'))
-                                if 'message' in chunk and 'content' in chunk['message']:
-                                    content = chunk['message']['content']
-                                    full_response += content
-                                    
-                                    # Send each character immediately for a smoother streaming experience
-                                    yield f"data: {json.dumps({'content': content, 'full_response': full_response})}\n\n"
-                                
-                                elif 'done' in chunk and chunk['done']:
-                                    # Save the conversation to disk when done, but only if conversation_id is provided and not null
-                                    if conversation_id and conversation_id != "null":
-                                        save_conversation(conversation_id, messages + [{"role": "assistant", "content": full_response}], model)
-                                    
-                                    # Send done signal
-                                    yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
-                                    break
-                            except json.JSONDecodeError as e:
-                                print(f"JSON decode error: {str(e)}, line: {line}")
-                                continue
-                except Exception as e:
-                    print(f"Error during streaming: {str(e)}")
-                    # Send a partial response with what we have so far
-                    if full_response:
-                        yield f"data: {json.dumps({'error': str(e), 'full_response': full_response, 'done': True})}\n\n"
-                    else:
-                        yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
-        
+                # Process the response line by line
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                        
+                    try:
+                        chunk = json.loads(line.decode('utf-8'))
+                        if 'message' in chunk and 'content' in chunk['message']:
+                            content = chunk['message']['content']
+                            full_response += content
+                            
+                            # Send each chunk immediately
+                            yield f"data: {json.dumps({'content': content})}\n\n"
+                        
+                        elif 'done' in chunk and chunk['done']:
+                            # Save the conversation to disk when done
+                            if conversation_id and conversation_id != "null":
+                                save_conversation(conversation_id, messages + [{"role": "assistant", "content": full_response}], model)
+                            
+                            # Send done signal
+                            yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                            return  # Important: exit the generator when done
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {str(e)}, line: {line}")
+                        continue
+                    except Exception as e:
+                        print(f"Error processing chunk: {str(e)}")
+                        continue
+                
+                # If we get here, the stream ended without a 'done' signal
+                if full_response:
+                    # Save the conversation with what we have
+                    if conversation_id and conversation_id != "null":
+                        save_conversation(conversation_id, messages + [{"role": "assistant", "content": full_response}], model)
+                    
+                    # Send a final message with what we have
+                    yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                
+        except requests.exceptions.ChunkedEncodingError as e:
+            print(f"Chunked encoding error: {str(e)}")
+            # This is the specific error we're trying to handle
+            yield f"data: {json.dumps({'error': 'Connection interrupted', 'done': True})}\n\n"
         except requests.exceptions.Timeout:
             print("Request to Ollama timed out")
             yield f"data: {json.dumps({'error': 'Request to language model timed out', 'done': True})}\n\n"
@@ -159,7 +174,8 @@ def chat():
     # Set response headers to prevent buffering
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
-    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Cache-Control'] = 'no-cache, no-transform'
+    response.headers['Connection'] = 'keep-alive'
     return response
 
 @app.route('/models', methods=['GET'])
