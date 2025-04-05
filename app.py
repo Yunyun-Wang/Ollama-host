@@ -93,7 +93,7 @@ def chat():
     # Handle non-streaming requests (for summarization)
     if not stream:
         try:
-            response = requests.post(OLLAMA_ENDPOINT, json=ollama_request)
+            response = requests.post(OLLAMA_ENDPOINT, json=ollama_request, timeout=60)
             response_data = response.json()
             return jsonify({
                 "full_response": response_data.get('message', {}).get('content', ''),
@@ -113,30 +113,50 @@ def chat():
                 
                 # Initialize an empty response
                 full_response = ""
+                last_update_time = time.time()
                 
                 # Stream the response
                 for line in response.iter_lines():
+                    # Update the last activity timestamp
+                    current_time = time.time()
+                    last_update_time = current_time
+                    
                     if line:
-                        chunk = json.loads(line.decode('utf-8'))
-                        if 'message' in chunk and 'content' in chunk['message']:
-                            content = chunk['message']['content']
-                            full_response += content
+                        try:
+                            chunk = json.loads(line.decode('utf-8'))
+                            if 'message' in chunk and 'content' in chunk['message']:
+                                content = chunk['message']['content']
+                                full_response += content
+                                
+                                # Send each character immediately for a smoother streaming experience
+                                yield f"data: {json.dumps({'content': content, 'full_response': full_response})}\n\n"
                             
-                            # Send each character immediately for a smoother streaming experience
-                            yield f"data: {json.dumps({'content': content, 'full_response': full_response})}\n\n"
-                        
-                        elif 'done' in chunk and chunk['done']:
-                            # Save the conversation to disk when done, but only if conversation_id is provided and not null
-                            if conversation_id and conversation_id != "null":
-                                save_conversation(conversation_id, messages + [{"role": "assistant", "content": full_response}], model)
-                            
-                            # Send done signal
-                            yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
-                            break
+                            elif 'done' in chunk and chunk['done']:
+                                # Save the conversation to disk when done, but only if conversation_id is provided and not null
+                                if conversation_id and conversation_id != "null":
+                                    save_conversation(conversation_id, messages + [{"role": "assistant", "content": full_response}], model)
+                                
+                                # Send done signal
+                                yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                                break
+                        except json.JSONDecodeError as e:
+                            print(f"JSON decode error: {str(e)}, line: {line}")
+                            continue
+                    
+                    # Send periodic keepalive to prevent connection timeouts
+                    if current_time - last_update_time > 5:  # Send keepalive every 5 seconds of inactivity
+                        yield f"data: {json.dumps({'keepalive': True})}\n\n"
+                        last_update_time = current_time
             
+        except requests.exceptions.Timeout:
+            print("Request to Ollama timed out")
+            yield f"data: {json.dumps({'error': 'Request to language model timed out', 'done': True})}\n\n"
+        except requests.exceptions.ConnectionError:
+            print("Connection error to Ollama")
+            yield f"data: {json.dumps({'error': 'Connection to language model failed', 'done': True})}\n\n"
         except Exception as e:
             print(f"Streaming error: {str(e)}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
     
     return Response(generate(), mimetype='text/event-stream')
 

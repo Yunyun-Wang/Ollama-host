@@ -1253,7 +1253,7 @@
             }
         }
 
-        // Update the sendMessage function to handle large responses better on Linux
+        // Add a more robust error handling approach for ReadableStream errors
         async function sendMessage() {
             console.log("=== STARTING NEW MESSAGE SEND ===");
             console.log("Current conversation ID:", currentConversationId);
@@ -1330,9 +1330,69 @@
             let responseBuffer = '';
             let totalBytesReceived = 0;
             
+            // Set up a watchdog timer to detect stalled streams
+            let watchdogTimer = null;
+            const WATCHDOG_TIMEOUT = 30000; // 30 seconds
+            
+            function resetWatchdog() {
+                if (watchdogTimer) clearTimeout(watchdogTimer);
+                watchdogTimer = setTimeout(() => {
+                    console.error("Watchdog timer triggered - stream appears to be stalled");
+                    handleStreamError(new Error("Stream timeout - no data received for 30 seconds"));
+                }, WATCHDOG_TIMEOUT);
+            }
+            
+            function clearWatchdog() {
+                if (watchdogTimer) {
+                    clearTimeout(watchdogTimer);
+                    watchdogTimer = null;
+                }
+            }
+            
+            // Function to handle stream errors and save partial responses
+            async function handleStreamError(error) {
+                console.error("Stream error detected:", error);
+                
+                // Clear the watchdog
+                clearWatchdog();
+                
+                // If we have a partial response, save it
+                if (fullResponse) {
+                    console.log("Saving partial response of length:", fullResponse.length);
+                    
+                    // Update the display with what we have so far
+                    updateMessageDisplay(messageDiv, fullResponse + "\n\n*Connection interrupted. Response may be incomplete.*");
+                    
+                    // Add the partial response to message history
+                    messageHistory.push({
+                        "role": "assistant",
+                        "content": fullResponse + "\n\n*Connection interrupted. Response may be incomplete.*"
+                    });
+                    
+                    // Save the conversation with the partial response
+                    await saveCurrentConversation();
+                }
+                
+                // Hide the stop button
+                hideStopButton();
+                
+                // If the controller is still active, abort it
+                if (currentController) {
+                    try {
+                        currentController.abort();
+                    } catch (e) {
+                        console.error("Error aborting controller:", e);
+                    }
+                    currentController = null;
+                }
+            }
+            
             try {
                 console.log("Sending request to server...");
                 console.time("serverResponseTime");
+                
+                // Start the watchdog
+                resetWatchdog();
                 
                 // Important: Send the FULL message history to maintain context
                 const response = await fetch('/chat', {
@@ -1360,123 +1420,155 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 
+                // Use a more robust approach to read the stream
                 while (true) {
-                    const { done, value } = await reader.read();
-                    
-                    if (done) {
-                        // Make sure we process any remaining data in the buffer
-                        if (responseBuffer) {
-                            try {
-                                const lines = responseBuffer.split('\n\n');
-                                for (const line of lines) {
-                                    if (line.startsWith('data: ')) {
-                                        const data = JSON.parse(line.substring(6));
-                                        if (data.full_response) {
-                                            fullResponse = data.full_response;
+                    try {
+                        // Reset the watchdog timer for each read attempt
+                        resetWatchdog();
+                        
+                        const { done, value } = await reader.read();
+                        
+                        if (done) {
+                            console.log("Stream complete (done=true)");
+                            clearWatchdog();
+                            
+                            // Process any remaining data in the buffer
+                            if (responseBuffer) {
+                                try {
+                                    const lines = responseBuffer.split('\n\n');
+                                    for (const line of lines) {
+                                        if (line.startsWith('data: ')) {
+                                            const data = JSON.parse(line.substring(6));
+                                            if (data.full_response) {
+                                                fullResponse = data.full_response;
+                                            }
                                         }
                                     }
+                                } catch (e) {
+                                    console.error('Error processing buffer at end:', e);
                                 }
-                            } catch (e) {
-                                console.error('Error processing buffer at end:', e);
                             }
+                            
+                            // Final update with the complete response
+                            updateMessageDisplay(messageDiv, fullResponse);
+                            
+                            // Add the complete response to message history
+                            messageHistory.push({
+                                "role": "assistant",
+                                "content": fullResponse
+                            });
+                            
+                            // Save the conversation with the assistant's response
+                            await saveCurrentConversation();
+                            
+                            // Generate a title if this is a new conversation with default title
+                            const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
+                            if (currentConversationIndex !== -1) {
+                                const currentConversation = conversations[currentConversationIndex];
+                                if (currentConversation.title === 'New Chat') {
+                                    // Wait a moment to ensure everything is saved
+                                    setTimeout(async () => {
+                                        await summarizeAndRenameConversation();
+                                        // Force a UI update
+                                        renderConversationList();
+                                    }, 500);
+                                }
+                            }
+                            
+                            // Make sure to hide the stop button
+                            hideStopButton();
+                            
+                            break;
                         }
                         
-                        // Final update with the complete response
-                        updateMessageDisplay(messageDiv, fullResponse);
+                        // Reset the watchdog timer since we received data
+                        resetWatchdog();
                         
-                        // Add the complete response to message history
-                        messageHistory.push({
-                            "role": "assistant",
-                            "content": fullResponse
-                        });
-                        
-                        // Save the conversation with the assistant's response
-                        await saveCurrentConversation();
-                        
-                        // Generate a title if this is a new conversation with default title
-                        const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
-                        if (currentConversationIndex !== -1) {
-                            const currentConversation = conversations[currentConversationIndex];
-                            if (currentConversation.title === 'New Chat') {
-                                // Wait a moment to ensure everything is saved
-                                setTimeout(async () => {
-                                    await summarizeAndRenameConversation();
-                                    // Force a UI update
-                                    renderConversationList();
-                                }, 500);
-                            }
+                        if (!value || value.length === 0) {
+                            console.warn("Received empty chunk, continuing...");
+                            continue;
                         }
                         
-                        // Make sure to hide the stop button
-                        hideStopButton();
+                        totalBytesReceived += value.length;
                         
-                        break;
-                    }
-                    
-                    const chunk = decoder.decode(value, { stream: true });
-                    responseBuffer += chunk;
-                    
-                    // Process complete events in the buffer
-                    const lines = responseBuffer.split('\n\n');
-                    responseBuffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
-                    
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.substring(6));
-                                
-                                if (data.content) {
-                                    fullResponse += data.content;
-                                }
-                                
-                                if (data.full_response) {
-                                    fullResponse = data.full_response;
-                                }
-                                
-                                // Update the display with what we have so far
-                                updateMessageDisplay(messageDiv, fullResponse);
-                                
-                                if (data.done) {
-                                    console.log("Received done signal from server");
+                        const chunk = decoder.decode(value, { stream: true });
+                        responseBuffer += chunk;
+                        
+                        // Process complete events in the buffer
+                        const lines = responseBuffer.split('\n\n');
+                        responseBuffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
+                        
+                        for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(line.substring(6));
                                     
-                                    // Final update with complete response
+                                    if (data.content) {
+                                        fullResponse += data.content;
+                                    }
+                                    
+                                    if (data.full_response) {
+                                        fullResponse = data.full_response;
+                                    }
+                                    
+                                    // Update the display with what we have so far
                                     updateMessageDisplay(messageDiv, fullResponse);
                                     
-                                    // Add the complete response to message history
-                                    messageHistory.push({
-                                        "role": "assistant",
-                                        "content": fullResponse
-                                    });
-                                    
-                                    // Save the conversation with the assistant's response
-                                    await saveCurrentConversation();
-                                    
-                                    // Generate a title if this is a new conversation with default title
-                                    const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
-                                    if (currentConversationIndex !== -1) {
-                                        const currentConversation = conversations[currentConversationIndex];
-                                        if (currentConversation.title === 'New Chat') {
-                                            // Wait a moment to ensure everything is saved
-                                            setTimeout(async () => {
-                                                await summarizeAndRenameConversation();
-                                                // Force a UI update
-                                                renderConversationList();
-                                            }, 500);
+                                    if (data.done) {
+                                        console.log("Received done signal from server");
+                                        clearWatchdog();
+                                        
+                                        // Final update with complete response
+                                        updateMessageDisplay(messageDiv, fullResponse);
+                                        
+                                        // Add the complete response to message history
+                                        messageHistory.push({
+                                            "role": "assistant",
+                                            "content": fullResponse
+                                        });
+                                        
+                                        // Save the conversation with the assistant's response
+                                        await saveCurrentConversation();
+                                        
+                                        // Generate a title if this is a new conversation with default title
+                                        const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
+                                        if (currentConversationIndex !== -1) {
+                                            const currentConversation = conversations[currentConversationIndex];
+                                            if (currentConversation.title === 'New Chat') {
+                                                // Wait a moment to ensure everything is saved
+                                                setTimeout(async () => {
+                                                    await summarizeAndRenameConversation();
+                                                    // Force a UI update
+                                                    renderConversationList();
+                                                }, 500);
+                                            }
                                         }
+                                        
+                                        // Make sure to hide the stop button
+                                        hideStopButton();
+                                        
+                                        // Clear the controller
+                                        currentController = null;
+                                        
+                                        // We're done, but we'll let the reader finish naturally
                                     }
-                                    
-                                    // Make sure to hide the stop button
-                                    hideStopButton();
-                                    
-                                    // Clear the controller
-                                    currentController = null;
-                                    
-                                    // We're done, but we'll let the reader finish naturally
+                                } catch (e) {
+                                    console.error('Error parsing SSE data:', e, line);
                                 }
-                            } catch (e) {
-                                console.error('Error parsing SSE data:', e, line);
                             }
                         }
+                    } catch (readError) {
+                        console.error('=== STREAM READ ERROR ===');
+                        console.error('Error type:', readError.constructor.name);
+                        console.error('Error name:', readError.name);
+                        console.error('Error message:', readError.message);
+                        console.error('Error stack:', readError.stack);
+                        
+                        // Handle the stream error
+                        await handleStreamError(readError);
+                        
+                        // Break out of the loop
+                        break;
                     }
                 }
             } catch (error) {
@@ -1485,12 +1577,9 @@
                 console.error('Error name:', error.name);
                 console.error('Error message:', error.message);
                 console.error('Error stack:', error.stack);
-                console.error('Current state:', {
-                    conversationId: currentConversationId,
-                    messageHistoryLength: messageHistory.length,
-                    fullResponseLength: fullResponse ? fullResponse.length : 0,
-                    totalBytesReceived
-                });
+                
+                // Clear the watchdog
+                clearWatchdog();
                 
                 // Make sure to hide the stop button even if there's an error
                 hideStopButton();
@@ -1527,8 +1616,6 @@
                         }
                     }
                 }
-                
-                console.log("=== END ERROR LOGGING ===");
             }
         }
 
