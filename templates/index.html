@@ -1253,7 +1253,7 @@
             }
         }
 
-        // Add a more robust error handling approach for ReadableStream errors
+        // Add a more robust error handling approach specifically for network connection losses
         async function sendMessage() {
             console.log("=== STARTING NEW MESSAGE SEND ===");
             console.log("Current conversation ID:", currentConversationId);
@@ -1329,70 +1329,57 @@
             let fullResponse = '';
             let responseBuffer = '';
             let totalBytesReceived = 0;
+            let lastActivityTime = Date.now();
             
-            // Set up a watchdog timer to detect stalled streams
-            let watchdogTimer = null;
-            const WATCHDOG_TIMEOUT = 30000; // 30 seconds
-            
-            function resetWatchdog() {
-                if (watchdogTimer) clearTimeout(watchdogTimer);
-                watchdogTimer = setTimeout(() => {
-                    console.error("Watchdog timer triggered - stream appears to be stalled");
-                    handleStreamError(new Error("Stream timeout - no data received for 30 seconds"));
-                }, WATCHDOG_TIMEOUT);
-            }
-            
-            function clearWatchdog() {
-                if (watchdogTimer) {
-                    clearTimeout(watchdogTimer);
-                    watchdogTimer = null;
-                }
-            }
-            
-            // Function to handle stream errors and save partial responses
-            async function handleStreamError(error) {
-                console.error("Stream error detected:", error);
+            // Set up a heartbeat to detect connection losses
+            const heartbeatInterval = setInterval(() => {
+                const inactiveTime = Date.now() - lastActivityTime;
+                console.log(`Stream inactive for ${inactiveTime}ms`);
                 
-                // Clear the watchdog
-                clearWatchdog();
-                
-                // If we have a partial response, save it
-                if (fullResponse) {
-                    console.log("Saving partial response of length:", fullResponse.length);
+                // If no activity for more than 15 seconds, consider the connection lost
+                if (inactiveTime > 15000) {
+                    console.error("Connection appears to be lost - no activity for 15 seconds");
+                    clearInterval(heartbeatInterval);
                     
-                    // Update the display with what we have so far
-                    updateMessageDisplay(messageDiv, fullResponse + "\n\n*Connection interrupted. Response may be incomplete.*");
-                    
-                    // Add the partial response to message history
-                    messageHistory.push({
-                        "role": "assistant",
-                        "content": fullResponse + "\n\n*Connection interrupted. Response may be incomplete.*"
-                    });
-                    
-                    // Save the conversation with the partial response
-                    await saveCurrentConversation();
-                }
-                
-                // Hide the stop button
-                hideStopButton();
-                
-                // If the controller is still active, abort it
-                if (currentController) {
-                    try {
-                        currentController.abort();
-                    } catch (e) {
-                        console.error("Error aborting controller:", e);
+                    // Save what we have so far
+                    if (fullResponse) {
+                        console.log("Connection lost. Saving partial response of length:", fullResponse.length);
+                        
+                        // Update the display with what we have so far
+                        updateMessageDisplay(messageDiv, fullResponse + "\n\n*Connection lost. Response may be incomplete.*");
+                        
+                        // Add the partial response to message history
+                        messageHistory.push({
+                            "role": "assistant",
+                            "content": fullResponse + "\n\n*Connection lost. Response may be incomplete.*"
+                        });
+                        
+                        // Save the conversation with the partial response
+                        saveCurrentConversation().then(() => {
+                            console.log("Saved partial response after connection loss");
+                        }).catch(e => {
+                            console.error("Failed to save partial response:", e);
+                        });
+                        
+                        // Hide the stop button
+                        hideStopButton();
+                        
+                        // If the controller is still active, abort it
+                        if (currentController) {
+                            try {
+                                currentController.abort();
+                                currentController = null;
+                            } catch (e) {
+                                console.error("Error aborting controller:", e);
+                            }
+                        }
                     }
-                    currentController = null;
                 }
-            }
+            }, 5000); // Check every 5 seconds
             
             try {
                 console.log("Sending request to server...");
                 console.time("serverResponseTime");
-                
-                // Start the watchdog
-                resetWatchdog();
                 
                 // Important: Send the FULL message history to maintain context
                 const response = await fetch('/chat', {
@@ -1420,19 +1407,18 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 
-                // Use a more robust approach to read the stream
                 while (true) {
                     try {
-                        // Reset the watchdog timer for each read attempt
-                        resetWatchdog();
+                        // Update activity timestamp
+                        lastActivityTime = Date.now();
                         
                         const { done, value } = await reader.read();
                         
                         if (done) {
                             console.log("Stream complete (done=true)");
-                            clearWatchdog();
+                            clearInterval(heartbeatInterval);
                             
-                            // Process any remaining data in the buffer
+                            // Make sure we process any remaining data in the buffer
                             if (responseBuffer) {
                                 try {
                                     const lines = responseBuffer.split('\n\n');
@@ -1481,9 +1467,6 @@
                             break;
                         }
                         
-                        // Reset the watchdog timer since we received data
-                        resetWatchdog();
-                        
                         if (!value || value.length === 0) {
                             console.warn("Received empty chunk, continuing...");
                             continue;
@@ -1503,6 +1486,12 @@
                                 try {
                                     const data = JSON.parse(line.substring(6));
                                     
+                                    // Handle keepalive messages
+                                    if (data.keepalive) {
+                                        console.log("Received keepalive from server");
+                                        continue;
+                                    }
+                                    
                                     if (data.content) {
                                         fullResponse += data.content;
                                     }
@@ -1511,12 +1500,17 @@
                                         fullResponse = data.full_response;
                                     }
                                     
+                                    if (data.error) {
+                                        console.error("Server reported error:", data.error);
+                                        throw new Error(`Server error: ${data.error}`);
+                                    }
+                                    
                                     // Update the display with what we have so far
                                     updateMessageDisplay(messageDiv, fullResponse);
                                     
                                     if (data.done) {
                                         console.log("Received done signal from server");
-                                        clearWatchdog();
+                                        clearInterval(heartbeatInterval);
                                         
                                         // Final update with complete response
                                         updateMessageDisplay(messageDiv, fullResponse);
@@ -1562,10 +1556,29 @@
                         console.error('Error type:', readError.constructor.name);
                         console.error('Error name:', readError.name);
                         console.error('Error message:', readError.message);
-                        console.error('Error stack:', readError.stack);
                         
-                        // Handle the stream error
-                        await handleStreamError(readError);
+                        // Clear the heartbeat interval
+                        clearInterval(heartbeatInterval);
+                        
+                        // If we have a partial response, save it
+                        if (fullResponse) {
+                            console.log("Read error occurred. Saving partial response of length:", fullResponse.length);
+                            
+                            // Update the display with what we have so far
+                            updateMessageDisplay(messageDiv, fullResponse + "\n\n*Connection error. Response may be incomplete.*");
+                            
+                            // Add the partial response to message history
+                            messageHistory.push({
+                                "role": "assistant",
+                                "content": fullResponse + "\n\n*Connection error. Response may be incomplete.*"
+                            });
+                            
+                            // Save the conversation with the partial response
+                            await saveCurrentConversation();
+                        }
+                        
+                        // Hide the stop button
+                        hideStopButton();
                         
                         // Break out of the loop
                         break;
@@ -1576,10 +1589,9 @@
                 console.error('Error type:', error.constructor.name);
                 console.error('Error name:', error.name);
                 console.error('Error message:', error.message);
-                console.error('Error stack:', error.stack);
                 
-                // Clear the watchdog
-                clearWatchdog();
+                // Clear the heartbeat interval
+                clearInterval(heartbeatInterval);
                 
                 // Make sure to hide the stop button even if there's an error
                 hideStopButton();
