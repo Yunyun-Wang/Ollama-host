@@ -1506,6 +1506,26 @@
                     errorDiv.textContent = `Error: ${error.message}`;
                     messagesContainer.appendChild(errorDiv);
                     messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    
+                    // If we have a partial response, try to save it
+                    if (fullResponse) {
+                        console.log("Attempting to save partial response after error");
+                        try {
+                            // Update the display with what we have so far
+                            updateMessageDisplay(messageDiv, fullResponse + "\n\n*Error occurred. Response may be incomplete.*");
+                            
+                            // Add the partial response to message history
+                            messageHistory.push({
+                                "role": "assistant",
+                                "content": fullResponse + "\n\n*Error occurred. Response may be incomplete.*"
+                            });
+                            
+                            // Save the conversation with the partial response
+                            await saveCurrentConversation();
+                        } catch (saveError) {
+                            console.error("Failed to save partial response:", saveError);
+                        }
+                    }
                 }
                 
                 console.log("=== END ERROR LOGGING ===");
