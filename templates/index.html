@@ -22,6 +22,10 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/languages/json.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/languages/html.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/languages/css.min.js"></script>
+    <!-- Add KaTeX for LaTeX rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" integrity="sha384-GvrOXuhMATgEsSwCs4smul74iXGOixntxDrLqv4NxpM0LJ5GU3aIlOIZuX0QyYK" crossorigin="anonymous">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js" integrity="sha384-cpW21h6RZv/phavutF+AuVYrr+dA8xD9zs6FwLpaCct6O9ctzYFfFr4dgmgccOTx" crossorigin="anonymous"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js" integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05" crossorigin="anonymous"></script>
     
     <style>
         /* Fix the body and app container to handle scrolling properly */
@@ -651,6 +655,28 @@
                 width: 100%;
                 margin-top: 10px;
             }
+        }
+
+        /* Add styles for LaTeX rendering */
+        .katex-display {
+            margin: 1em 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 0.5em 0;
+        }
+
+        .katex {
+            font-size: 1.1em;
+        }
+
+        .message .katex-display {
+            background-color: #f8fafc;
+            border-radius: 6px;
+            padding: 10px;
+        }
+
+        .thinking .katex-display {
+            background-color: #f1f5f9;
         }
     </style>
 </head>
@@ -1631,7 +1657,7 @@
             }
         }
 
-        // Completely rewrite the updateMessageDisplay function to fix the placeholder issue
+        // Add LaTeX rendering support to the updateMessageDisplay function
         function updateMessageDisplay(messageDiv, content) {
             // Process the content for display
             let displayContent = content;
@@ -1645,28 +1671,35 @@
                 return `THINKING_TOKEN_${thinkingMatches.length - 1}_PLACEHOLDER`;
             });
             
-            // Handle incomplete thinking sections (when streaming)
+            // Check for incomplete thinking section
             let incompleteThinking = null;
-            if (processedContent.includes('<think>') && !processedContent.includes('</think>')) {
-                const thinkStart = processedContent.lastIndexOf('<think>');
-                incompleteThinking = processedContent.substring(thinkStart + 7); // 7 is length of '<think>'
-                processedContent = processedContent.substring(0, thinkStart);
+            if (content.includes('<think>') && !content.endsWith('</think>')) {
+                // Find the last opening tag that doesn't have a closing tag
+                const lastOpenTagPos = content.lastIndexOf('<think>');
+                const lastCloseTagPos = content.lastIndexOf('</think>');
+                
+                // Only consider it incomplete if the last open tag comes after the last close tag
+                if (lastOpenTagPos > lastCloseTagPos) {
+                    incompleteThinking = content.substring(lastOpenTagPos + 7); // +7 to skip '<think>'
+                    
+                    // Remove the incomplete thinking from the processed content to avoid duplication
+                    processedContent = processedContent.substring(0, processedContent.lastIndexOf('<think>'));
+                }
             }
             
-            // Parse markdown
+            // Parse the content with markdown
             let parsedContent = marked.parse(processedContent);
             
             // Now replace all thinking tokens with styled thinking sections
-            // This approach handles all possible ways the token might appear in HTML
             for (let i = 0; i < thinkingMatches.length; i++) {
                 const token = `THINKING_TOKEN_${i}_PLACEHOLDER`;
                 const thinking = thinkingMatches[i];
                 
-                // Format thinking content with proper line breaks
-                const formattedThinking = thinking.replace(/\n/g, '<br>');
+                // Parse the thinking content with markdown as well
+                const parsedThinking = marked.parse(thinking);
                 
-                // Create the replacement HTML
-                const thinkingHTML = `<span class="thinking">${formattedThinking}</span>`;
+                // Create the replacement HTML - wrap the parsed markdown in a thinking div
+                const thinkingHTML = `<div class="thinking">${parsedThinking}</div>`;
                 
                 // Replace all occurrences of the token, regardless of surrounding HTML
                 while (parsedContent.includes(token)) {
@@ -1682,16 +1715,50 @@
             
             // Add incomplete thinking section if present
             if (incompleteThinking) {
-                const formattedIncompleteThinking = incompleteThinking.replace(/\n/g, '<br>');
-                parsedContent += `<span class="thinking">${formattedIncompleteThinking}</span>`;
+                // Parse the incomplete thinking with markdown
+                const parsedIncompleteThinking = marked.parse(incompleteThinking);
+                
+                // Add the incomplete thinking section
+                parsedContent += `<div class="thinking thinking-incomplete">${parsedIncompleteThinking}</div>`;
             }
             
-            // Set the HTML content
+            // Update the message content
             messageDiv.innerHTML = parsedContent;
             
             // Apply syntax highlighting to any code blocks
             messageDiv.querySelectorAll('pre code').forEach((block) => {
                 hljs.highlightElement(block);
+            });
+            
+            // Also apply syntax highlighting to code blocks inside thinking sections
+            messageDiv.querySelectorAll('.thinking pre code').forEach((block) => {
+                hljs.highlightElement(block);
+            });
+            
+            // Render LaTeX expressions
+            renderMathInElement(messageDiv, {
+                delimiters: [
+                    {left: '$$', right: '$$', display: true},
+                    {left: '$', right: '$', display: false},
+                    {left: '\\(', right: '\\)', display: false},
+                    {left: '\\[', right: '\\]', display: true}
+                ],
+                throwOnError: false,
+                output: 'html'
+            });
+            
+            // Also render LaTeX in thinking sections
+            messageDiv.querySelectorAll('.thinking').forEach((thinkingElement) => {
+                renderMathInElement(thinkingElement, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\(', right: '\\)', display: false},
+                        {left: '\\[', right: '\\]', display: true}
+                    ],
+                    throwOnError: false,
+                    output: 'html'
+                });
             });
             
             // Scroll to bottom
