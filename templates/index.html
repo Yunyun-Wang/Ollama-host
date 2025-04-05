@@ -896,39 +896,38 @@
             
             // Only create a new chat if we don't already have one in progress
             if (!currentConversationId || messageHistory.length > 0) {
-                console.log("Starting new chat");
+                // Generate a new conversation ID
+                const conversationId = generateUUID();
                 
-                // Save the current conversation first if needed
-                if (currentConversationId && messageHistory.length > 0) {
-                    saveCurrentConversation();
-                }
-                
-                // Create a new conversation
-                currentConversationId = generateUUID();
+                // IMPORTANT: Reset the message history
                 messageHistory = [];
                 
+                // Set the current conversation ID
+                currentConversationId = conversationId;
+                
                 // Add to conversations array
-                const newConversation = {
-                    id: currentConversationId,
+                conversations.push({
+                    id: conversationId,
                     title: 'New Chat',
                     messages: [],
                     model: currentModel,
                     updated_at: Date.now()
-                };
-                
-                conversations.unshift(newConversation);
-                saveConversations();
+                });
                 
                 // Clear the messages container
                 const messagesContainer = document.getElementById('messages-container');
-                if (messagesContainer) {
-                    messagesContainer.innerHTML = '';
-                }
+                messagesContainer.innerHTML = '';
                 
-                // Update the UI
+                // Update the conversation list
                 renderConversationList();
-            } else {
-                console.log("Not creating a new chat as one already exists");
+                
+                // Mark this conversation as active
+                document.querySelectorAll('.conversation-item').forEach(item => {
+                    item.classList.remove('active');
+                    if (item.dataset.id === conversationId) {
+                        item.classList.add('active');
+                    }
+                });
             }
         }
 
@@ -1005,14 +1004,13 @@
         }
 
         // Load a conversation
-        async function loadConversation(id) {
+        async function loadConversation(conversationId) {
             try {
-                // Fetch the conversation from the server
-                const response = await fetch(`/conversations/${id}`);
+                const response = await fetch(`/conversations/${conversationId}`);
                 const conversation = await response.json();
                 
                 // Set the current conversation ID
-                currentConversationId = id;
+                currentConversationId = conversationId;
                 
                 // Set the current model
                 currentModel = conversation.model || 'deepseek-r1:7b';
@@ -1024,31 +1022,35 @@
                     }
                 }
                 
-                // Set the message history
-                messageHistory = [...conversation.messages]; // Create a copy to avoid reference issues
+                // IMPORTANT: Set the message history from the loaded conversation
+                messageHistory = conversation.messages ? [...conversation.messages] : [];
                 
-                console.log("Loaded conversation with message history length:", messageHistory.length);
-                
-                // Clear and reload chat
+                // Clear the messages container
                 const messagesContainer = document.getElementById('messages-container');
                 messagesContainer.innerHTML = '';
                 
-                // Render messages
-                messageHistory.forEach(msg => {
-                    addMessageToChat(msg.role, msg.content);
-                });
+                // Add each message to the chat
+                if (messageHistory && messageHistory.length > 0) {
+                    messageHistory.forEach(message => {
+                        addMessageToChat(message.role, message.content);
+                    });
+                }
                 
-                // Update active state in the sidebar
+                // Mark this conversation as active in the sidebar
                 document.querySelectorAll('.conversation-item').forEach(item => {
                     item.classList.remove('active');
+                    if (item.dataset.id === conversationId) {
+                        item.classList.add('active');
+                    }
                 });
                 
-                const activeItem = document.querySelector(`.conversation-item[data-id="${id}"]`);
-                if (activeItem) {
-                    activeItem.classList.add('active');
-                }
+                // Scroll to the bottom of the messages
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                
+                return true;
             } catch (error) {
                 console.error('Error loading conversation:', error);
+                return false;
             }
         }
 
@@ -1251,7 +1253,7 @@
             }
         }
 
-        // Update the sendMessage function to use the selected model
+        // Update the sendMessage function to properly handle title generation
         async function sendMessage() {
             // Get the input value
             const userInput = document.getElementById('user-input').value.trim();
@@ -1272,149 +1274,152 @@
                 "content": userInput
             });
             
-            // Create a new conversation if this is the first message
+            // Create a new conversation if needed
             if (!currentConversationId) {
-                currentConversationId = generateUUID();
-                console.log("Created new conversation with ID:", currentConversationId);
+                const conversationId = generateUUID();
+                currentConversationId = conversationId;
                 
-                const newConversation = {
-                    id: currentConversationId,
+                // Add to conversations array
+                conversations.push({
+                    id: conversationId,
                     title: 'New Chat',
                     messages: [...messageHistory],
                     model: selectedModel,
                     updated_at: Date.now()
-                };
+                });
                 
-                // Save the new conversation to the server first
-                try {
-                    console.log("Saving new conversation to server...");
-                    const saveResponse = await fetch('/conversations', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(newConversation)
-                    });
-                    
-                    const saveData = await saveResponse.json();
-                    console.log("Server response for new conversation:", saveData);
-                    
-                    if (!saveData.success) {
-                        console.error("Failed to save new conversation to server");
-                    }
-                } catch (error) {
-                    console.error("Error saving new conversation to server:", error);
-                }
-                
-                // Add to local array and update UI
-                conversations.unshift(newConversation);
-                saveConversations();
+                // Update the UI
                 renderConversationList();
             } else {
-                // Save the updated conversation
-                console.log("Updating existing conversation:", currentConversationId);
-                await saveCurrentConversation();
+                // Update the existing conversation with the new message
+                const conversationIndex = conversations.findIndex(c => c.id === currentConversationId);
+                if (conversationIndex !== -1) {
+                    conversations[conversationIndex].messages = [...messageHistory];
+                    conversations[conversationIndex].updated_at = Date.now();
+                }
             }
-
-            // Create a message div for the assistant's response
+            
+            // Save the conversation with the user's message
+            await saveCurrentConversation();
+            
+            // Add a placeholder for the assistant's response
             const messagesContainer = document.getElementById('messages-container');
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message assistant-message';
+            messageDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
             messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
             // Show the stop button
             showStopButton();
             
+            // Create a new AbortController for this request
+            currentController = new AbortController();
+            const signal = currentController.signal;
+            
             let fullResponse = '';
-
+            let responseBuffer = '';
+            
             try {
-                console.log("Sending message with history length:", messageHistory.length);
-                console.log("Using conversation ID:", currentConversationId);
-                
-                // Create a new AbortController for this request
-                currentController = new AbortController();
-                const signal = currentController.signal;
-                
-                // Use fetch with streaming and the abort signal
+                // Important: Send the FULL message history to maintain context
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        messages: messageHistory,
+                        messages: messageHistory,  // Send the complete message history
                         model: selectedModel,
-                        conversation_id: currentConversationId
+                        conversation_id: currentConversationId,
+                        stream: true
                     }),
-                    signal: signal // Add the abort signal
+                    signal: signal
                 });
-
-                // Set up the event source for server-sent events
+                
+                // Handle streaming response
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 
-                // Process the stream
                 while (true) {
-                    const { value, done } = await reader.read();
+                    const { done, value } = await reader.read();
                     
-                    // If the stream is done, make sure we save the conversation
                     if (done) {
-                        console.log("Stream ended naturally");
+                        // Make sure we process any remaining data in the buffer
+                        if (responseBuffer) {
+                            try {
+                                const lines = responseBuffer.split('\n\n');
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        const data = JSON.parse(line.substring(6));
+                                        if (data.full_response) {
+                                            fullResponse = data.full_response;
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Error processing buffer at end:', e);
+                            }
+                        }
                         
-                        // Add the complete response to message history if we have content
-                        if (fullResponse) {
-                            messageHistory.push({
-                                "role": "assistant",
-                                "content": fullResponse
-                            });
-                            
-                            // Save the conversation with the assistant's response
-                            await saveCurrentConversation();
-                            
-                            // Generate a title if this was the first exchange
-                            if (messageHistory.length === 2) {
+                        // Final update with the complete response
+                        updateMessageDisplay(messageDiv, fullResponse);
+                        
+                        // Add the complete response to message history
+                        messageHistory.push({
+                            "role": "assistant",
+                            "content": fullResponse
+                        });
+                        
+                        // Save the conversation with the assistant's response
+                        await saveCurrentConversation();
+                        
+                        // Generate a title if this is a new conversation with default title
+                        const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
+                        if (currentConversationIndex !== -1) {
+                            const currentConversation = conversations[currentConversationIndex];
+                            if (currentConversation.title === 'New Chat') {
+                                // Wait a moment to ensure everything is saved
                                 setTimeout(async () => {
                                     await summarizeAndRenameConversation();
+                                    // Force a UI update
                                     renderConversationList();
                                 }, 500);
                             }
                         }
                         
-                        // Hide the stop button
+                        // Make sure to hide the stop button
                         hideStopButton();
+                        
                         break;
                     }
                     
-                    // Decode the chunk
                     const chunk = decoder.decode(value, { stream: true });
+                    responseBuffer += chunk;
                     
-                    // Process each line in the chunk
-                    const lines = chunk.split('\n\n');
+                    // Process complete events in the buffer
+                    const lines = responseBuffer.split('\n\n');
+                    responseBuffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
+                    
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.substring(6));
                                 
-                                if (data.error) {
-                                    console.error('Error:', data.error);
-                                    messageDiv.innerHTML = 'Sorry, there was an error processing your request.';
-                                    break;
-                                }
-                                
                                 if (data.content) {
                                     fullResponse += data.content;
-                                    
-                                    // Update the UI immediately with each content chunk
-                                    updateMessageDisplay(messageDiv, fullResponse);
-                                    
-                                    // Allow UI to breathe
-                                    await new Promise(resolve => setTimeout(resolve, 0));
                                 }
+                                
+                                if (data.full_response) {
+                                    fullResponse = data.full_response;
+                                }
+                                
+                                // Update the display with what we have so far
+                                updateMessageDisplay(messageDiv, fullResponse);
                                 
                                 if (data.done) {
                                     console.log("Received done signal from server");
                                     
-                                    // Final update
+                                    // Final update with complete response
                                     updateMessageDisplay(messageDiv, fullResponse);
                                     
                                     // Add the complete response to message history
@@ -1426,26 +1431,27 @@
                                     // Save the conversation with the assistant's response
                                     await saveCurrentConversation();
                                     
-                                    // Generate a title if this was the first exchange
-                                    if (messageHistory.length === 2) {
-                                        // Wait a moment to ensure everything is saved
-                                        setTimeout(async () => {
-                                            await summarizeAndRenameConversation();
-                                            // Force a UI update
-                                            renderConversationList();
-                                        }, 500);
+                                    // Generate a title if this is a new conversation with default title
+                                    const currentConversationIndex = conversations.findIndex(c => c.id === currentConversationId);
+                                    if (currentConversationIndex !== -1) {
+                                        const currentConversation = conversations[currentConversationIndex];
+                                        if (currentConversation.title === 'New Chat') {
+                                            // Wait a moment to ensure everything is saved
+                                            setTimeout(async () => {
+                                                await summarizeAndRenameConversation();
+                                                // Force a UI update
+                                                renderConversationList();
+                                            }, 500);
+                                        }
                                     }
                                     
-                                    // Log the updated message history
-                                    console.log("Updated message history length:", messageHistory.length);
-                                    
-                                    // Hide the stop button
+                                    // Make sure to hide the stop button
                                     hideStopButton();
                                     
                                     // Clear the controller
                                     currentController = null;
                                     
-                                    break;
+                                    // We're done, but we'll let the reader finish naturally
                                 }
                             } catch (e) {
                                 console.error('Error parsing SSE data:', e, line);
@@ -1454,71 +1460,82 @@
                     }
                 }
             } catch (error) {
-                // Check if this was an abort error
-                if (error.name === 'AbortError') {
-                    console.log('Request was aborted');
-                    
-                    // Add a note that generation was stopped
-                    messageDiv.innerHTML += '<p><em>Generation stopped by user</em></p>';
-                    
-                    // Add what we got so far to the message history
-                    if (fullResponse) {
-                        messageHistory.push({
-                            "role": "assistant",
-                            "content": fullResponse + "\n\n_Generation stopped by user_"
-                        });
-                        
-                        // Save the partial response
-                        await saveCurrentConversation();
-                    }
-                } else {
-                    console.error('Error:', error);
-                    messageDiv.innerHTML = 'Sorry, there was an error processing your request.';
-                    
-                    // Still save the conversation even if there's an error
-                    await saveCurrentConversation();
-                }
+                console.error('Error in chat:', error);
                 
-                // Final check to ensure the conversation is saved
-                if (fullResponse && !messageHistory.some(m => m.role === 'assistant' && m.content === fullResponse)) {
-                    console.log("Ensuring response is saved in message history");
-                    messageHistory.push({
-                        "role": "assistant",
-                        "content": fullResponse
-                    });
-                    await saveCurrentConversation();
+                // Make sure to hide the stop button even if there's an error
+                hideStopButton();
+                
+                // Show error message
+                if (error.name === 'AbortError') {
+                    // This is a normal abort, no need to show an error
+                    console.log('Request was aborted');
+                } else {
+                    // Add an error message to the chat
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'message system-message';
+                    errorDiv.textContent = `Error: ${error.message}`;
+                    messagesContainer.appendChild(errorDiv);
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 }
             }
-            
-            // Ensure the stop button is hidden even if there's an unexpected exit
-            hideStopButton();
-            
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        // Helper function to update message display
+        // Completely rewrite the updateMessageDisplay function to fix the placeholder issue
         function updateMessageDisplay(messageDiv, content) {
             // Process the content for display
             let displayContent = content;
             
-            // First parse markdown
-            let parsedContent = marked.parse(displayContent);
-            
-            // Then handle thinking sections
-            parsedContent = parsedContent.replace(/<think>([\s\S]*?)<\/think>/g, (match, thinking) => {
-                // Remove any <p> tags that marked might have added
-                thinking = thinking.replace(/<\/?p>/g, '');
-                return `<span class="thinking">${thinking}</span>`;
+            // First extract all thinking sections
+            const thinkingMatches = [];
+            let processedContent = displayContent.replace(/<think>([\s\S]*?)<\/think>/g, (match, thinking) => {
+                // Store the thinking content
+                thinkingMatches.push(thinking);
+                // Replace with a unique token that won't be affected by markdown parsing
+                return `THINKING_TOKEN_${thinkingMatches.length - 1}_PLACEHOLDER`;
             });
             
-            // For incomplete thinking sections (when streaming)
-            if (parsedContent.includes('<think>') && !parsedContent.includes('</think>')) {
-                const thinkStart = parsedContent.lastIndexOf('<think>');
-                const thinkContent = parsedContent.substring(thinkStart + 7); // 7 is length of '<think>'
-                parsedContent = parsedContent.substring(0, thinkStart) + 
-                               `<span class="thinking">${thinkContent}</span>`;
+            // Handle incomplete thinking sections (when streaming)
+            let incompleteThinking = null;
+            if (processedContent.includes('<think>') && !processedContent.includes('</think>')) {
+                const thinkStart = processedContent.lastIndexOf('<think>');
+                incompleteThinking = processedContent.substring(thinkStart + 7); // 7 is length of '<think>'
+                processedContent = processedContent.substring(0, thinkStart);
             }
             
+            // Parse markdown
+            let parsedContent = marked.parse(processedContent);
+            
+            // Now replace all thinking tokens with styled thinking sections
+            // This approach handles all possible ways the token might appear in HTML
+            for (let i = 0; i < thinkingMatches.length; i++) {
+                const token = `THINKING_TOKEN_${i}_PLACEHOLDER`;
+                const thinking = thinkingMatches[i];
+                
+                // Format thinking content with proper line breaks
+                const formattedThinking = thinking.replace(/\n/g, '<br>');
+                
+                // Create the replacement HTML
+                const thinkingHTML = `<span class="thinking">${formattedThinking}</span>`;
+                
+                // Replace all occurrences of the token, regardless of surrounding HTML
+                while (parsedContent.includes(token)) {
+                    parsedContent = parsedContent.replace(token, thinkingHTML);
+                }
+                
+                // Also try with HTML-encoded versions
+                const encodedToken = token.replace(/_/g, '&#95;');
+                while (parsedContent.includes(encodedToken)) {
+                    parsedContent = parsedContent.replace(encodedToken, thinkingHTML);
+                }
+            }
+            
+            // Add incomplete thinking section if present
+            if (incompleteThinking) {
+                const formattedIncompleteThinking = incompleteThinking.replace(/\n/g, '<br>');
+                parsedContent += `<span class="thinking">${formattedIncompleteThinking}</span>`;
+            }
+            
+            // Set the HTML content
             messageDiv.innerHTML = parsedContent;
             
             // Apply syntax highlighting to any code blocks
@@ -1531,7 +1548,7 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        // Update the summarizeAndRenameConversation function to use a separate request that doesn't affect the main conversation
+        // Update the summarizeAndRenameConversation function to be more reliable
         async function summarizeAndRenameConversation() {
             console.log("=== TITLE GENERATION DEBUG ===");
             console.log("Current conversation ID:", currentConversationId);
@@ -1662,15 +1679,14 @@
                 if (responseData.success) {
                     console.log("Server successfully saved the title");
                     
-                    // Update local storage with the updated conversations array
-                    console.log("Updating local storage...");
-                    localStorage.setItem('ollama-conversations', JSON.stringify(conversations));
-                    
                     // Update the UI
                     console.log("Updating UI...");
                     renderConversationList();
+                    
+                    return title;
                 } else {
                     console.error("Server reported error when saving conversation");
+                    throw new Error("Server error when saving title");
                 }
             } catch (error) {
                 console.error('Error generating or saving title:', error);
@@ -1686,11 +1702,29 @@
                 };
                 
                 conversations[currentConversationIndex] = updatedConversation;
-                saveConversations();
+                
+                // Save to server
+                try {
+                    const response = await fetch('/conversations', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(updatedConversation)
+                    });
+                    
+                    if (response.ok) {
+                        console.log("Saved fallback title to server");
+                        renderConversationList();
+                        return fallbackTitle;
+                    }
+                } catch (e) {
+                    console.error("Error saving fallback title:", e);
+                }
+                
                 renderConversationList();
+                return fallbackTitle;
             }
-            
-            console.log("=== END TITLE GENERATION DEBUG ===");
         }
 
         // Add this function to your JavaScript
@@ -1775,6 +1809,11 @@
             
             // Load models when the page loads
             loadModels();
+        });
+
+        // Add a window event listener to ensure the stop button is hidden when the page is loaded
+        window.addEventListener('load', function() {
+            hideStopButton();
         });
     </script>
 </body>
