@@ -176,6 +176,7 @@ def chat():
     response.headers['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
     response.headers['Cache-Control'] = 'no-cache, no-transform'
     response.headers['Connection'] = 'keep-alive'
+    response.headers['Content-Encoding'] = 'identity'
     return response
 
 @app.route('/models', methods=['GET'])
