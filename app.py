@@ -108,7 +108,8 @@ def chat():
         try:
             # Use a session for better connection handling
             with requests.Session() as session:
-                response = session.post(OLLAMA_ENDPOINT, json=ollama_request, stream=True, timeout=60)
+                # Add timeout and increase buffer size
+                response = session.post(OLLAMA_ENDPOINT, json=ollama_request, stream=True, timeout=120)
                 
                 # Initialize an empty response
                 full_response = ""

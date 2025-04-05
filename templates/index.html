@@ -1253,14 +1253,19 @@
             }
         }
 
-        // Update the sendMessage function to properly handle title generation
+        // Update the sendMessage function to handle large responses better on Linux
         async function sendMessage() {
+            console.log("=== STARTING NEW MESSAGE SEND ===");
+            console.log("Current conversation ID:", currentConversationId);
+            console.log("Message history length:", messageHistory.length);
+            
             // Get the input value
             const userInput = document.getElementById('user-input').value.trim();
             
             // Get the selected model
             const modelSelector = document.getElementById('model-selector');
             const selectedModel = modelSelector.value;
+            console.log("Using model:", selectedModel);
             
             if (!userInput) return;
 
@@ -1273,11 +1278,13 @@
                 "role": "user",
                 "content": userInput
             });
+            console.log("Added user message to history. New length:", messageHistory.length);
             
             // Create a new conversation if needed
             if (!currentConversationId) {
                 const conversationId = generateUUID();
                 currentConversationId = conversationId;
+                console.log("Created new conversation with ID:", conversationId);
                 
                 // Add to conversations array
                 conversations.push({
@@ -1296,11 +1303,13 @@
                 if (conversationIndex !== -1) {
                     conversations[conversationIndex].messages = [...messageHistory];
                     conversations[conversationIndex].updated_at = Date.now();
+                    console.log("Updated existing conversation:", currentConversationId);
                 }
             }
             
             // Save the conversation with the user's message
             await saveCurrentConversation();
+            console.log("Saved conversation with user message");
             
             // Add a placeholder for the assistant's response
             const messagesContainer = document.getElementById('messages-container');
@@ -1319,8 +1328,12 @@
             
             let fullResponse = '';
             let responseBuffer = '';
+            let totalBytesReceived = 0;
             
             try {
+                console.log("Sending request to server...");
+                console.time("serverResponseTime");
+                
                 // Important: Send the FULL message history to maintain context
                 const response = await fetch('/chat', {
                     method: 'POST',
@@ -1335,6 +1348,13 @@
                     }),
                     signal: signal
                 });
+                
+                console.timeEnd("serverResponseTime");
+                console.log("Initial response received from server:", response.status, response.statusText);
+                
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                }
                 
                 // Handle streaming response
                 const reader = response.body.getReader();
@@ -1460,7 +1480,17 @@
                     }
                 }
             } catch (error) {
-                console.error('Error in chat:', error);
+                console.error('=== ERROR IN CHAT ===');
+                console.error('Error type:', error.constructor.name);
+                console.error('Error name:', error.name);
+                console.error('Error message:', error.message);
+                console.error('Error stack:', error.stack);
+                console.error('Current state:', {
+                    conversationId: currentConversationId,
+                    messageHistoryLength: messageHistory.length,
+                    fullResponseLength: fullResponse ? fullResponse.length : 0,
+                    totalBytesReceived
+                });
                 
                 // Make sure to hide the stop button even if there's an error
                 hideStopButton();
@@ -1468,7 +1498,7 @@
                 // Show error message
                 if (error.name === 'AbortError') {
                     // This is a normal abort, no need to show an error
-                    console.log('Request was aborted');
+                    console.log('Request was aborted by user');
                 } else {
                     // Add an error message to the chat
                     const errorDiv = document.createElement('div');
@@ -1477,6 +1507,8 @@
                     messagesContainer.appendChild(errorDiv);
                     messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 }
+                
+                console.log("=== END ERROR LOGGING ===");
             }
         }
 
