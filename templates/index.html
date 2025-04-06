@@ -1687,8 +1687,34 @@
                 }
             }
             
+            // Protect LaTeX expressions from markdown parsing
+            const latexMatches = [];
+            processedContent = processedContent.replace(/(\$\$[\s\S]*?\$\$|\$[^\$]*?\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g, (match) => {
+                // Store the LaTeX content
+                latexMatches.push(match);
+                // Replace with a unique token
+                return `LATEX_TOKEN_${latexMatches.length - 1}_PLACEHOLDER`;
+            });
+            
             // Parse the content with markdown
             let parsedContent = marked.parse(processedContent);
+            
+            // Restore LaTeX expressions
+            for (let i = 0; i < latexMatches.length; i++) {
+                const token = `LATEX_TOKEN_${i}_PLACEHOLDER`;
+                const latex = latexMatches[i];
+                
+                // Replace all occurrences of the token
+                while (parsedContent.includes(token)) {
+                    parsedContent = parsedContent.replace(token, latex);
+                }
+                
+                // Also try with HTML-encoded versions
+                const encodedToken = token.replace(/_/g, '&#95;');
+                while (parsedContent.includes(encodedToken)) {
+                    parsedContent = parsedContent.replace(encodedToken, latex);
+                }
+            }
             
             // Now replace all thinking tokens with styled thinking sections
             for (let i = 0; i < thinkingMatches.length; i++) {
