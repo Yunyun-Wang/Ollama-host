@@ -1158,21 +1158,105 @@
             messageDiv.className = `message ${role}-message`;
             
             if (role === 'assistant') {
-                // First parse the markdown
-                let parsedContent = marked.parse(content);
-                
-                // Then handle the thinking sections
-                parsedContent = parsedContent.replace(/<think>([\s\S]*?)<\/think>/g, (match, thinking) => {
-                    // Remove any <p> tags that marked might have added
-                    thinking = thinking.replace(/<\/?p>/g, '');
-                    return `<span class="thinking">${thinking}</span>`;
+                // Use the same approach as updateMessageDisplay for consistent rendering
+                // First extract all thinking sections
+                const thinkingMatches = [];
+                let processedContent = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, thinking) => {
+                    // Store the thinking content
+                    thinkingMatches.push(thinking);
+                    // Replace with a unique token that won't be affected by markdown parsing
+                    return `THINKING_TOKEN_${thinkingMatches.length - 1}_PLACEHOLDER`;
                 });
                 
+                // Protect LaTeX expressions from markdown parsing
+                const latexMatches = [];
+                processedContent = processedContent.replace(/(\$\$[\s\S]*?\$\$|\$[^\$]*?\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g, (match) => {
+                    // Store the LaTeX content
+                    latexMatches.push(match);
+                    // Replace with a unique token
+                    return `LATEX_TOKEN_${latexMatches.length - 1}_PLACEHOLDER`;
+                });
+                
+                // Parse the content with markdown
+                let parsedContent = marked.parse(processedContent);
+                
+                // Restore LaTeX expressions
+                for (let i = 0; i < latexMatches.length; i++) {
+                    const token = `LATEX_TOKEN_${i}_PLACEHOLDER`;
+                    const latex = latexMatches[i];
+                    
+                    // Replace all occurrences of the token
+                    while (parsedContent.includes(token)) {
+                        parsedContent = parsedContent.replace(token, latex);
+                    }
+                    
+                    // Also try with HTML-encoded versions
+                    const encodedToken = token.replace(/_/g, '&#95;');
+                    while (parsedContent.includes(encodedToken)) {
+                        parsedContent = parsedContent.replace(encodedToken, latex);
+                    }
+                }
+                
+                // Now replace all thinking tokens with styled thinking sections
+                for (let i = 0; i < thinkingMatches.length; i++) {
+                    const token = `THINKING_TOKEN_${i}_PLACEHOLDER`;
+                    const thinking = thinkingMatches[i];
+                    
+                    // Parse the thinking content with markdown as well
+                    const parsedThinking = marked.parse(thinking);
+                    
+                    // Create the replacement HTML - wrap the parsed markdown in a thinking div
+                    const thinkingHTML = `<div class="thinking">${parsedThinking}</div>`;
+                    
+                    // Replace all occurrences of the token, regardless of surrounding HTML
+                    while (parsedContent.includes(token)) {
+                        parsedContent = parsedContent.replace(token, thinkingHTML);
+                    }
+                    
+                    // Also try with HTML-encoded versions
+                    const encodedToken = token.replace(/_/g, '&#95;');
+                    while (parsedContent.includes(encodedToken)) {
+                        parsedContent = parsedContent.replace(encodedToken, thinkingHTML);
+                    }
+                }
+                
+                // Update the message content
                 messageDiv.innerHTML = parsedContent;
                 
-                // Apply syntax highlighting
+                // Apply syntax highlighting to any code blocks
                 messageDiv.querySelectorAll('pre code').forEach((block) => {
                     hljs.highlightElement(block);
+                });
+                
+                // Also apply syntax highlighting to code blocks inside thinking sections
+                messageDiv.querySelectorAll('.thinking pre code').forEach((block) => {
+                    hljs.highlightElement(block);
+                });
+                
+                // Render LaTeX expressions
+                renderMathInElement(messageDiv, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\(', right: '\\)', display: false},
+                        {left: '\\[', right: '\\]', display: true}
+                    ],
+                    throwOnError: false,
+                    output: 'html'
+                });
+                
+                // Also render LaTeX in thinking sections
+                messageDiv.querySelectorAll('.thinking').forEach((thinkingElement) => {
+                    renderMathInElement(thinkingElement, {
+                        delimiters: [
+                            {left: '$$', right: '$$', display: true},
+                            {left: '$', right: '$', display: false},
+                            {left: '\\(', right: '\\)', display: false},
+                            {left: '\\[', right: '\\]', display: true}
+                        ],
+                        throwOnError: false,
+                        output: 'html'
+                    });
                 });
             } else {
                 messageDiv.textContent = content;
